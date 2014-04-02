@@ -75,7 +75,7 @@ static inline int in_heap(void *p) {
 }
 
 // Return whether a header is valid
-static inline int header_is_valid(void *header_ptr) {
+static inline int is_valid_header(void *header_ptr) {
     size_t header = *((size_t *) header_ptr);
     return (header & (~(ALIGNMENT - 1))) > 1;
 }
@@ -147,31 +147,36 @@ static inline size_t pack (size_t size, size_t alloc) {
     return size | alloc;
 }
 
-// get size from a word
-static inline size_t get_size (size_t header) {
-    REQUIRES((header & (ALIGNMENT - 1)) <= 1);
+static inline void *get_header_ptr (void *ptr) {
+    return (void *)((uintptr_t) ptr - SIZE_T_SIZE);
+}
+
+static inline size_t get_header (void *ptr) {
+    REQUIRES(ptr != NULL);
+    void *header_ptr = get_header_ptr(ptr);
+    REQUIRES(is_valid_header(header_ptr));
+    return *((size_t *) header_ptr);
+}
+
+static inline size_t get_size (void *ptr) {
+    REQUIRES(ptr != NULL);
+    size_t header = get_header(ptr);
     return header & (~(ALIGNMENT - 1));
 }
 
-// get allocated status from a word
-static inline size_t get_alloc (size_t header) {
-    REQUIRES((header & (ALIGNMENT - 1)) <= 1);
+static inline size_t get_alloc (void *ptr) {
+    REQUIRES(ptr != NULL);
+    size_t header = get_header(ptr);
     return header & 0x1;
-
-}
-
-static inline size_t ptr2header (void *header_ptr) {
-    REQUIRES(in_heap(header_ptr));
-    REQUIRES(is_aligned(header_ptr));
-    REQUIRES(header_is_valid(header_ptr));
-    return *((size_t *) header_ptr);
 }
 
 static inline void *increment_pointer(void *ptr, size_t inc) {
     return (void *)((uintptr_t) ptr + inc);
 }
 
-static inline void write_header(void *header_ptr, size_t size, size_t alloc) {
+static inline void write_header(void *ptr, size_t size, size_t alloc) {
+    REQUIRES(ptr != NULL);
+    void *header_ptr = get_header_ptr(ptr);
     REQUIRES(in_heap(header_ptr));
     REQUIRES(is_aligned(header_ptr));
     *((size_t *) header_ptr) = pack(size, alloc);
@@ -182,27 +187,28 @@ static inline void print_heap (void) {
     void *heap_lo = mem_heap_lo();
     void *heap_hi = mem_heap_hi();
     // dbg_printf("lo: %lx\thi: %lx\tsize: %zd\n", (uintptr_t) heap_lo, (uintptr_t) heap_hi, mem_heapsize());
-    void *p = heap_lo;
+    void *p = increment_pointer(heap_lo, SIZE_T_SIZE);
     dbg_printf("|");
     while (p < heap_hi) {
-        size_t header = ptr2header(p);
-        size_t size = get_size(header);
-        dbg_printf(" %lx %zx %zd |", (uintptr_t) p, size, get_alloc(header));
+        size_t size = get_size(p);
+        dbg_printf(" %lx %zx %zd |", (uintptr_t) p, size, get_alloc(p));
         p = increment_pointer(p, size);
     }
     dbg_printf("\n");
     return;
 }
 
-static inline void swap_alloc (void *header_ptr) {
+static inline void swap_alloc (void *ptr) {
+    REQUIRES(ptr != NULL);
+    void *header_ptr = get_header_ptr(ptr);
     REQUIRES(header_ptr != NULL);
     REQUIRES(in_heap(header_ptr));
     REQUIRES(is_aligned(header_ptr));
-    REQUIRES(header_is_valid(header_ptr));
+    REQUIRES(is_valid_header(header_ptr));
+    /* swap the header's alloc bit */
     *((size_t *) header_ptr) ^= 0x1;
     return;
 }
-
 
 /*
  *  Malloc Implementation
@@ -215,11 +221,11 @@ static inline void swap_alloc (void *header_ptr) {
  */
 int mm_init(void) {
     dbg_printf("initialize:\n");
-    // print_heap_info();
-    void *heap_lo = mem_heap_lo();
-    size_t heap_size = mem_heapsize();
-    *((size_t *) heap_lo) = pack(heap_size, 0);
-    checkheap(1);
+    // // print_heap_info();
+    // void *heap_lo = mem_heap_lo();
+    // size_t heap_size = mem_heapsize();
+    // *((size_t *) heap_lo) = pack(heap_size, 0);
+    // checkheap(1);
     return 0;
 }
 
@@ -229,51 +235,52 @@ int mm_init(void) {
 void *malloc (size_t size) {
     checkheap(1);  // Let's make sure the heap is ok!
     /* check if there is any free block */
-    void *p = mem_heap_lo();
-    size_t size_required = ALIGN(size) + SIZE_T_SIZE;
-    dbg_printf("malloc: %zx %zx\n", size, size_required);
+    void *p = increment_pointer(mem_heap_lo(), SIZE_T_SIZE);
+    size_t required_size = ALIGN(size) + SIZE_T_SIZE;
+    dbg_printf("malloc: %zx %zx\n", size, required_size);
     /* search through the heap */
     while (p < mem_heap_hi()) {
-        size_t header = ptr2header(p);
-        size_t block_size = get_size(header);
-        if (!get_alloc(header) && block_size >= size_required) {
-            *((size_t *) p) = pack(size_required, 1);
+        size_t block_size = get_size(p);
+        if (!get_alloc(p) && block_size >= required_size) {
+            /* found a free space that has enough space */
+            write_header(p, required_size, 1);
             /* split the block */
-            if (block_size > size_required) {
-                printf("split\n");
-                size_t remain_size = block_size - size_required;
-                write_header(increment_pointer(p, size_required), remain_size, 0);
+            if (block_size > required_size) {
+                size_t remain_size = block_size - required_size;
+                write_header(increment_pointer(p, required_size), remain_size, 0);
             }
+
             checkheap(1);
             print_heap();
-            return increment_pointer(p, SIZE_T_SIZE);
+            return p;
         }
         /* increment p */
         p = increment_pointer(p, block_size);
     }
     /* no free block */
-    p = mem_sbrk(size_required);
-    write_header(p, size_required, 1);
-    // dbg_printf("brk:\n");
-    // print_heap_info();
+    void *brkp;
+    if ((brkp = mem_sbrk(required_size)) == 0) {
+        /* mem_sbrk failed */
+        dbg_printf("error: mem_sbrk failed");
+        return NULL;
+    }
+
+    p = increment_pointer(brkp, SIZE_T_SIZE);
+    write_header(p, required_size, 1);
     
-    // dbg_printf("get: %lx\n", (uintptr_t) p + SIZE_T_SIZE);
+    dbg_printf("get: %lx\n", (uintptr_t) p);
     checkheap(1);
     print_heap();
-    return increment_pointer(p, SIZE_T_SIZE);
+    return p;
 }
 
 /*
  * free
  */
 void free (void *ptr) {
-    REQUIRES(ptr != NULL);
-    void *header_ptr = (void *)((uintptr_t) ptr - SIZE_T_SIZE);
-    REQUIRES(in_heap(header_ptr));
-    REQUIRES(is_aligned(header_ptr));
-    REQUIRES(header_is_valid(header_ptr));
+    if (ptr == NULL) return;
     dbg_printf("free: %lx\n", (uintptr_t) ptr);
-    swap_alloc(header_ptr);
+    swap_alloc(ptr);
     print_heap();
     return;
 }
@@ -282,9 +289,32 @@ void free (void *ptr) {
  * realloc - you may want to look at mm-naive.c
  */
 void *realloc(void *oldptr, size_t size) {
-    oldptr = oldptr;
-    size = size;
-    return NULL;
+    REQUIRES(oldptr != NULL || size != 0);
+    dbg_printf("realloc: %lx %zx\n", (uintptr_t) oldptr, size);
+    size_t oldsize;
+    void *newptr;
+    /* If oldptr is NULL, then this is just malloc */
+    if (oldptr == NULL) {
+        return malloc(size);
+    }
+    /* If size == 0 then this is just free, and we return NULL */
+    if (size == 0) {
+        free(oldptr);
+        return NULL;
+    }
+    /* If realloc() fails the original block is left untouched */
+    if ((newptr = malloc(size)) == NULL) return NULL;
+    
+    /* Copy the old data. */
+    oldsize = get_size(oldptr);
+    if(size < oldsize) oldsize = size;
+    memcpy(newptr, oldptr, oldsize);
+
+    /* Free the old block. */
+    free(oldptr);
+    print_heap();
+
+    return newptr;
 }
 
 /*
@@ -298,7 +328,7 @@ void *calloc (size_t nmemb, size_t size) {
 
 // Returns 0 if no errors were found, otherwise returns the error
 int mm_checkheap(int verbose) {
-    void *p = mem_heap_lo();
+    void *p = increment_pointer(mem_heap_lo(), SIZE_T_SIZE);
     void *heap_hi = mem_heap_hi();
     /* traverse the heap */
     while (p < heap_hi) {
@@ -313,16 +343,15 @@ int mm_checkheap(int verbose) {
             return -1;
         }
 
-        size_t header = *((size_t *) p);
         /* check if the header is valid */
-        if (get_alloc(header) > 1) {
+        if (get_alloc(p) > 1) {
             dbg_printf("error: headers are corrupted\n");
             return -1;
         }
-        p = (void *)((uintptr_t) p + get_size(header));
+        p = increment_pointer(p, get_size(p));
     }
     /* check if the pointer p ends at the end of the last block */
-    if (p != (void *)((uintptr_t) heap_hi + 1)) {
+    if (p != (void *)((uintptr_t) heap_hi + 1 + SIZE_T_SIZE)) {
         dbg_printf("error: headers are corrupted\n");
         return -1;
     }
