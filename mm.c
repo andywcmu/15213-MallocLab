@@ -75,70 +75,10 @@ static inline int in_heap(void *p) {
 }
 
 // Return whether a header is valid
-static inline int is_valid_header(void *header_ptr) {
+static inline int is_valid_label(void *header_ptr) {
     size_t header = *((size_t *) header_ptr);
     return (header & (~(ALIGNMENT - 1))) > 1;
 }
-
-
-/*
- *  Block Functions
- *  ---------------
- *  TODO: Add your comment describing block functions here.
- *  The functions below act similar to the macros in the book, but calculate
- *  size in multiples of 4 bytes.
- */
-
-// Return the size of the given block in multiples of the word size
-// static inline unsigned int block_size(const uint32_t* block) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-
-//     return (block[0] & 0x3FFFFFFF);
-// }
-
-// Return true if the block is free, false otherwise
-// static inline int block_free(const uint32_t* block) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-
-//     return !(block[0] & 0x40000000);
-// }
-
-// Mark the given block as free(1)/alloced(0) by marking the header and footer.
-// static inline void block_mark(uint32_t* block, int free) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-
-//     unsigned int next = block_size(block) + 1;
-//     block[0] = free ? block[0] & (int) 0xBFFFFFFF : block[0] | 0x40000000;
-//     block[next] = block[0];
-// }
-
-// Return a pointer to the memory malloc should return
-// static inline uint32_t* block_mem(uint32_t* const block) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-//     REQUIRES(is_aligned(block + 1));
-
-//     return block + 1;
-// }
-
-// Return the header to the previous block
-// static inline uint32_t* block_prev(uint32_t* const block) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-
-//     return block - block_size(block - 1) - 1;
-// }
-
-// Return the header to the next block
-// static inline uint32_t* block_next(uint32_t* const block) {
-//     REQUIRES(block != NULL);
-//     REQUIRES(in_heap(block));
-
-//     return block + block_size(block) + 1;
-// }
 
 // pack a size and a allocated status into a word
 static inline size_t pack (size_t size, size_t alloc) {
@@ -147,51 +87,116 @@ static inline size_t pack (size_t size, size_t alloc) {
     return size | alloc;
 }
 
+static inline size_t read_label(void *label_ptr) {
+    return *((size_t *) label_ptr);
+}
+
+static inline size_t read_size (void *label_ptr) {
+    REQUIRES(label_ptr != NULL);
+    REQUIRES(in_heap(label_ptr));
+    REQUIRES(is_aligned(label_ptr));
+    REQUIRES(is_valid_label(label_ptr));
+    size_t label = read_label(label_ptr);
+    return label & (~(ALIGNMENT - 1));
+}
+
+static inline size_t read_alloc (void *label_ptr) {
+    REQUIRES(label_ptr != NULL);
+    REQUIRES(in_heap(label_ptr));
+    REQUIRES(is_aligned(label_ptr));
+    REQUIRES(is_valid_label(label_ptr));
+    size_t label = read_label(label_ptr);
+    return label & 0x1;
+}
+
+static inline void write_label(void *label_ptr, size_t label) {
+    *((size_t *) label_ptr) = label;
+}
+
 static inline void *get_header_ptr (void *ptr) {
+    REQUIRES(ptr != NULL);
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+
     return (void *)((uintptr_t) ptr - SIZE_T_SIZE);
 }
 
-static inline size_t get_header (void *ptr) {
+static inline void *get_footer_ptr (void *ptr, size_t size) {
     REQUIRES(ptr != NULL);
-    void *header_ptr = get_header_ptr(ptr);
-    REQUIRES(is_valid_header(header_ptr));
-    return *((size_t *) header_ptr);
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+    REQUIRES(size >= SIZE_T_SIZE);
+
+    return (void *)((uintptr_t) ptr + size - 2 * SIZE_T_SIZE);
 }
 
-static inline size_t get_size (void *ptr) {
+static inline void *get_prev_footer_ptr (void *ptr) {
     REQUIRES(ptr != NULL);
-    size_t header = get_header(ptr);
-    return header & (~(ALIGNMENT - 1));
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+
+    return (void *)((uintptr_t) ptr - 2 * SIZE_T_SIZE);
 }
 
-static inline size_t get_alloc (void *ptr) {
+static inline void *get_next_header_ptr (void *ptr, size_t size) {
     REQUIRES(ptr != NULL);
-    size_t header = get_header(ptr);
-    return header & 0x1;
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+
+    return (void *)((uintptr_t) ptr + size - SIZE_T_SIZE);
 }
+
+static inline void *get_prev_header_ptr (void *ptr, size_t prev_size) {
+    REQUIRES(ptr != NULL);
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+
+    return (void *)((uintptr_t) ptr - prev_size - SIZE_T_SIZE);
+}
+
+static inline void *get_next_footer_ptr (void *ptr, size_t size, size_t next_size) {
+    REQUIRES(ptr != NULL);
+    REQUIRES(in_heap(ptr));
+    REQUIRES(is_aligned(ptr));
+
+    return (void *)((uintptr_t) ptr + size + next_size - 2 * SIZE_T_SIZE);
+}
+
+
+
 
 static inline void *increment_pointer(void *ptr, size_t inc) {
     return (void *)((uintptr_t) ptr + inc);
 }
 
-static inline void write_header(void *ptr, size_t size, size_t alloc) {
+
+
+static inline void write_header_footer(void *ptr, size_t size, size_t alloc) {
     REQUIRES(ptr != NULL);
-    void *header_ptr = get_header_ptr(ptr);
-    REQUIRES(in_heap(header_ptr));
-    REQUIRES(is_aligned(header_ptr));
-    *((size_t *) header_ptr) = pack(size, alloc);
+    void *header = get_header_ptr(ptr);
+    void *footer = get_footer_ptr(ptr, size);
+    REQUIRES(in_heap(header));
+    REQUIRES(is_aligned(header));
+    REQUIRES(in_heap(footer));
+    REQUIRES(is_aligned(footer));
+    size_t label = pack(size, alloc);
+    write_label(header, label);
+    write_label(footer, label);
     return;
 }
+
+
 
 static inline void print_heap (void) {
     void *heap_lo = mem_heap_lo();
     void *heap_hi = mem_heap_hi();
-    // dbg_printf("lo: %lx\thi: %lx\tsize: %zd\n", (uintptr_t) heap_lo, (uintptr_t) heap_hi, mem_heapsize());
+    dbg_printf("lo: %lx\thi: %lx\tsize: %zx\n", (uintptr_t) heap_lo, (uintptr_t) heap_hi, mem_heapsize());
     void *p = increment_pointer(heap_lo, SIZE_T_SIZE);
     dbg_printf("|");
     while (p < heap_hi) {
-        size_t size = get_size(p);
-        dbg_printf(" %lx %zx %zd |", (uintptr_t) p, size, get_alloc(p));
+        void *header = get_header_ptr(p);
+        size_t size = read_size(header);
+        dbg_printf(" %lx %zx %zd |", (uintptr_t) p, size, read_alloc(header));
         p = increment_pointer(p, size);
     }
     dbg_printf("\n");
@@ -200,13 +205,16 @@ static inline void print_heap (void) {
 
 static inline void swap_alloc (void *ptr) {
     REQUIRES(ptr != NULL);
-    void *header_ptr = get_header_ptr(ptr);
-    REQUIRES(header_ptr != NULL);
-    REQUIRES(in_heap(header_ptr));
-    REQUIRES(is_aligned(header_ptr));
-    REQUIRES(is_valid_header(header_ptr));
+    void *header = get_header_ptr(ptr);
+    size_t size = read_size(header);
+    void *footer = get_footer_ptr(ptr, size);
+    REQUIRES(header != NULL);
+    REQUIRES(in_heap(header) && in_heap(footer));
+    REQUIRES(is_aligned(header) && is_aligned(footer));
+    REQUIRES(is_valid_label(header) && is_valid_label(footer));
     /* swap the header's alloc bit */
-    *((size_t *) header_ptr) ^= 0x1;
+    *((size_t *) header) ^= 0x1;
+    *((size_t *) footer) ^= 0x1;
     return;
 }
 
@@ -236,22 +244,23 @@ void *malloc (size_t size) {
     checkheap(1);  // Let's make sure the heap is ok!
     /* check if there is any free block */
     void *p = increment_pointer(mem_heap_lo(), SIZE_T_SIZE);
-    size_t required_size = ALIGN(size) + SIZE_T_SIZE;
+    size_t required_size = ALIGN(size) + 2 * SIZE_T_SIZE;
     dbg_printf("malloc: %zx %zx\n", size, required_size);
     /* search through the heap */
     while (p < mem_heap_hi()) {
-        size_t block_size = get_size(p);
-        if (!get_alloc(p) && block_size >= required_size) {
+        void *header = get_header_ptr(p);
+        size_t block_size = read_size(header);
+        if (!read_alloc(header) && block_size >= required_size) {
             /* found a free space that has enough space */
-            write_header(p, required_size, 1);
+            write_header_footer(p, required_size, 1);
             /* split the block */
             if (block_size > required_size) {
                 size_t remain_size = block_size - required_size;
-                write_header(increment_pointer(p, required_size), remain_size, 0);
+                write_header_footer(increment_pointer(p, required_size), remain_size, 0);
             }
 
             checkheap(1);
-            print_heap();
+            // print_heap();
             return p;
         }
         /* increment p */
@@ -266,11 +275,12 @@ void *malloc (size_t size) {
     }
 
     p = increment_pointer(brkp, SIZE_T_SIZE);
-    write_header(p, required_size, 1);
+
+    write_header_footer(p, required_size, 1);
     
-    dbg_printf("get: %lx\n", (uintptr_t) p);
+    // dbg_printf("get: %lx\n", (uintptr_t) p);
     checkheap(1);
-    print_heap();
+    // print_heap();
     return p;
 }
 
@@ -280,8 +290,43 @@ void *malloc (size_t size) {
 void free (void *ptr) {
     if (ptr == NULL) return;
     dbg_printf("free: %lx\n", (uintptr_t) ptr);
-    swap_alloc(ptr);
-    print_heap();
+    void *header = get_header_ptr(ptr);
+    size_t size = read_size(header);
+    void *prev_footer = get_prev_footer_ptr(ptr);
+    void *next_header = get_next_header_ptr(ptr, size);
+    /* if both prev and next are free */
+    if ((in_heap(prev_footer) && !read_alloc(prev_footer)) &&
+        (in_heap(next_header) && !read_alloc(next_header))) {
+        size_t prev_size = read_size(prev_footer);
+        size_t next_size = read_size(next_header);
+        void *prev_header = get_prev_header_ptr(ptr, prev_size);
+        void *next_footer = get_next_footer_ptr(ptr, size, next_size);
+        size_t label = size + prev_size + next_size;
+        write_label(prev_header, label);
+        write_label(next_footer, label);
+    }
+    /* if only the prev is free */
+    else if (in_heap(prev_footer) && !read_alloc(prev_footer)) {
+        size_t prev_size = read_size(prev_footer);
+        void *prev_header = get_prev_header_ptr(ptr, prev_size);
+        void *footer = get_footer_ptr(ptr, size);
+        size_t label = size + prev_size;
+        write_label(prev_header, label);
+        write_label(footer, label);
+    }
+    /* if only the next is free */
+    else if (in_heap(next_header) && !read_alloc(next_header)) {
+        size_t next_size = read_size(next_header);
+        void *next_footer = get_next_footer_ptr(ptr, size, next_size);
+        size_t label = size + next_size;
+        write_label(header, label);
+        write_label(next_footer, label);
+    }
+    /* otherwise, only the current block is free */
+    else {
+        swap_alloc(ptr);
+    }
+    // print_heap();
     return;
 }
 
@@ -306,13 +351,14 @@ void *realloc(void *oldptr, size_t size) {
     if ((newptr = malloc(size)) == NULL) return NULL;
     
     /* Copy the old data. */
-    oldsize = get_size(oldptr);
+    void *old_header = get_header_ptr(oldptr);
+    oldsize = read_size(old_header);
     if(size < oldsize) oldsize = size;
     memcpy(newptr, oldptr, oldsize);
 
     /* Free the old block. */
     free(oldptr);
-    print_heap();
+    // print_heap();
 
     return newptr;
 }
@@ -328,10 +374,22 @@ void *calloc (size_t nmemb, size_t size) {
 
 // Returns 0 if no errors were found, otherwise returns the error
 int mm_checkheap(int verbose) {
-    void *p = increment_pointer(mem_heap_lo(), SIZE_T_SIZE);
+    void *heap_lo = mem_heap_lo();
     void *heap_hi = mem_heap_hi();
+    if (heap_hi < heap_lo) return 0;
+    if (heap_hi < increment_pointer(heap_lo, SIZE_T_SIZE)) {
+        dbg_printf("error: heap size is smaller than double word\n");
+        return -1;
+    }
+    void *p = increment_pointer(heap_lo, SIZE_T_SIZE);
+    void *header, *footer;
+    size_t size;
+    size_t prev_free_flag = 0;
     /* traverse the heap */
     while (p < heap_hi) {
+        header = get_header_ptr(p);
+        size = read_size(header);
+        footer = get_footer_ptr(p, size);
         /* check if p is in heap */
         if (!in_heap(p)) {
             dbg_printf("error: a pointer is out of bound\n");
@@ -344,17 +402,37 @@ int mm_checkheap(int verbose) {
         }
 
         /* check if the header is valid */
-        if (get_alloc(p) > 1) {
-            dbg_printf("error: headers are corrupted\n");
+        if ((read_label(header) & (ALIGNMENT - 1)) > 1) {
+            dbg_printf("error: header has invalid format\n");
             return -1;
         }
-        p = increment_pointer(p, get_size(p));
+
+        /* check if the header is the same as the footer */
+        if (read_label(header) != read_label(footer)) {
+            dbg_printf("error: header is not the same as footer. header: %zx, footer: %zx\n", read_label(header), read_label(footer));
+            return -1;
+        }
+
+        /* if the current block is free, the next block cannot be free */
+        if (read_alloc(header)) {
+            prev_free_flag = 0;
+        } else {
+            if (prev_free_flag == 1) {
+                dbg_printf("error: there are two consecutive free blocks\n");
+                return -1;
+            }
+            prev_free_flag = 1;
+        }
+
+        p = increment_pointer(p, read_size(header));
     }
     /* check if the pointer p ends at the end of the last block */
     if (p != (void *)((uintptr_t) heap_hi + 1 + SIZE_T_SIZE)) {
         dbg_printf("error: headers are corrupted\n");
         return -1;
     }
+    // dbg_printf("hi: %lx\tp: %lx\n", (uintptr_t) heap_hi + 1 + SIZE_T_SIZE, (uintptr_t) p);
+
     verbose = verbose;
     return 0;
 }
