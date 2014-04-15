@@ -50,7 +50,7 @@
 #define ALIGNMENT 8
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) ((size + (ALIGNMENT-1)) & (~(ALIGNMENT-1)))
+#define ALIGN(size) (((size - 4 + (ALIGNMENT-1)) & (~(ALIGNMENT-1))) + 4)
 
 #define UINT32_T_SIZE (sizeof(uint32_t))
 #define HEAD_LEAP UINT32_T_SIZE
@@ -189,13 +189,18 @@ static inline void *get_next_block (void *ptr, uint32_t size) {
 
 static inline void write_header_footer(void *ptr, uint32_t size, uint32_t alloc) {
     REQUIRES(ptr != NULL);
-    void *header = get_header_ptr(ptr);
-    void *footer = get_footer_ptr(ptr, size);
-    REQUIRES(in_heap(header));
-    REQUIRES(in_heap(footer));
+    
     uint32_t label = pack(size, alloc);
+    void *header = get_header_ptr(ptr);
+    REQUIRES(in_heap(header));
     write_label(header, label);
-    write_label(footer, label);
+
+    if (alloc == 0) {
+        void *footer = get_footer_ptr(ptr, size);
+        REQUIRES(in_heap(footer));
+        write_label(footer, label);
+    }
+    
     return;
 }
 
@@ -280,7 +285,7 @@ static inline void write_prev_offset (void *ptr, void *prev_ptr) {
 }
 
 static inline int group_index (uint32_t size) {
-    REQUIRES(size == ALIGN(size));
+    REQUIRES((size & (ALIGNMENT-1)) == 0);
     uint32_t s = size / ALIGNMENT;
     if (s <= SEG_BLOCK_SPLIT_1) {
         return s - 1;
@@ -307,7 +312,9 @@ static inline void print_heap (void) {
     while (p < decrement_pointer(heap_hi, TAIL_LEAP)) {
         void *header = get_header_ptr(p);
         uint32_t size = read_size(header);
-        dbg_printf(" %lx %x %d |", (uintptr_t) p, size, read_alloc(header));
+        void *footer = get_footer_ptr(p, size);
+        footer = footer;
+        dbg_printf(" %lx %x %d %x %x |", (uintptr_t) p, size, read_alloc(header), read_label(header), read_label(footer));
         p = increment_pointer(p, size);
     }
     REQUIRES(p == increment_pointer(heap_hi, 1));
@@ -370,6 +377,16 @@ static inline void insert_into_list (void *ptr, uint32_t size) {
 }
 
 
+static inline uint32_t required_size (size_t size) {
+    REQUIRES(size < (1l << 32));
+    uint32_t need_size = ALIGN(size) + UINT32_T_SIZE;
+    if (need_size < ONE_ELEM_BLOCK_SIZE) {
+        need_size = ONE_ELEM_BLOCK_SIZE;
+    }
+    return need_size;
+}
+
+
 /*
  *  Malloc Implementation
  *  ---------------------
@@ -403,13 +420,13 @@ int mm_init(void) {
     return 0;
 }
 
-void *find_free_block (uint32_t required_size) {
-    REQUIRES(required_size >= 1);
+void *find_free_block (uint32_t need_size) {
+    REQUIRES(need_size >= 1);
     
     /* search through the segregated link list */
     void *p;
     int gi;
-    for (gi = group_index(required_size); gi < SEG_LIST_SIZE; gi++) {
+    for (gi = group_index(need_size); gi < SEG_LIST_SIZE; gi++) {
         p = free_head[gi];
         while (p != NULL) {
             void *header = get_header_ptr(p);
@@ -419,15 +436,15 @@ void *find_free_block (uint32_t required_size) {
             uint32_t block_size = read_size(header);
             void *next_free = next_free_block(p);
             void *prev_free = prev_free_block(p);
-            if (block_size >= required_size) {
+            if (block_size >= need_size) {
                 /* found a free space that has enough space */
-                if (block_size > required_size + ONE_ELEM_BLOCK_SIZE) {
+                if (block_size > need_size + ONE_ELEM_BLOCK_SIZE) {
                     /* we should split the block */
                     /* modify the header of the current block */
-                    write_header_footer(p, required_size, 1);
+                    write_header_footer(p, need_size, 1);
                     /* write the header of the splitted block */
-                    uint32_t remain_size = block_size - required_size;
-                    void *splitted_ptr = increment_pointer(p, required_size);
+                    uint32_t remain_size = block_size - need_size;
+                    void *splitted_ptr = increment_pointer(p, need_size);
                     write_header_footer(splitted_ptr, remain_size, 0);
                     
                     /* delete the block from the current link list */
@@ -445,6 +462,7 @@ void *find_free_block (uint32_t required_size) {
                     /* otherwise, we don't have to split */
                     /* modify the alloc of the current block */
                     swap_alloc(p);
+                    // write_header_footer(p, block_size, 0);
                     /* change the prev free bit of the next block to be false */
                     void *next_block = get_next_block(p, block_size);
                     swap_prev_free(next_block);
@@ -469,13 +487,13 @@ void *find_free_block (uint32_t required_size) {
     return NULL;
 }
 
-void *brk_new_block (uint32_t required_size) {
+void *brk_new_block (uint32_t need_size) {
     void *brkp;
     void *tail = increment_pointer(mem_heap_hi(), 1);
     if (read_prev_free(tail)) {
         void *prev_footer = get_prev_footer_ptr(tail);
         uint32_t prev_size = read_size(prev_footer);
-        if ((brkp = mem_sbrk(required_size - prev_size)) == 0) {
+        if ((brkp = mem_sbrk(need_size - prev_size)) == 0) {
             /* mem_sbrk failed */
             dbg_printf("error: mem_sbrk failed");
             return NULL;
@@ -483,7 +501,7 @@ void *brk_new_block (uint32_t required_size) {
         
         void *prev_ptr = get_prev_block(tail, prev_size);
         disconnect_from_list(prev_ptr, prev_size);
-        write_header_footer(prev_ptr, required_size, 1);
+        write_header_footer(prev_ptr, need_size, 1);
 
         tail = increment_pointer(mem_heap_hi(), 1);
         void *tail_label = get_header_ptr(tail);
@@ -493,14 +511,14 @@ void *brk_new_block (uint32_t required_size) {
         return prev_ptr;
     }
     else {
-        if ((brkp = mem_sbrk(required_size)) == 0) {
+        if ((brkp = mem_sbrk(need_size)) == 0) {
             /* mem_sbrk failed */
             dbg_printf("error: mem_sbrk failed");
             return NULL;
         }
 
         void *p = increment_pointer(brkp, UINT32_T_SIZE - TAIL_LEAP);
-        write_header_footer(p, required_size, 1);
+        write_header_footer(p, need_size, 1);
 
         tail = increment_pointer(mem_heap_hi(), 1);
         void *tail_label = get_header_ptr(tail);
@@ -511,6 +529,7 @@ void *brk_new_block (uint32_t required_size) {
     }
 }
 
+
 /*
  * malloc
  */
@@ -518,15 +537,15 @@ void *malloc (size_t size) {
     REQUIRES(size < (1l << 32));
     if (size == 0) return NULL;
 
-    uint32_t required_size = ALIGN(size) + 2 * UINT32_T_SIZE;
-    dbg_printf("malloc: %zx %x\n", size, required_size);
+    uint32_t need_size = required_size(size);
+    dbg_printf("malloc: %zx %x\n", size, need_size);
     
     /* check if there is any free block */
-    void *p = find_free_block(required_size);
+    void *p = find_free_block(need_size);
     if (p != NULL) return p;
 
     /* no free block, so brk for a new block */
-    return brk_new_block(required_size);
+    return brk_new_block(need_size);
 }
 
 /*
@@ -542,7 +561,7 @@ void free (void *ptr) {
     void *next_ptr = get_next_block(ptr, size);
     
     /* if both prev and next are free */
-    if ((in_heap(prev_footer) && !read_alloc(prev_footer)) &&
+    if (read_prev_free(ptr) &&
         (in_heap(next_header) && !read_alloc(next_header))) {
         uint32_t prev_size = read_size(prev_footer);
         uint32_t next_size = read_size(next_header);
@@ -565,7 +584,7 @@ void free (void *ptr) {
 
     }
     /* if only the prev is free */
-    else if (in_heap(prev_footer) && !read_alloc(prev_footer)) {
+    else if (read_prev_free(ptr)) {
         uint32_t prev_size = read_size(prev_footer);
         void *prev_ptr = get_prev_block(ptr, prev_size);
 
@@ -607,7 +626,15 @@ void free (void *ptr) {
     /* otherwise, only the current block is free */
     else {
         /* write alloc bit */
-        swap_alloc(ptr);
+        // swap_alloc(ptr);
+        // write_header_footer(ptr, size, 0);
+        // void *header = get_header_ptr(ptr);
+        void *footer = get_footer_ptr(ptr, size);
+        REQUIRES(in_heap(header));
+        REQUIRES(in_heap(footer));
+        uint32_t label = pack(size, 0);
+        write_label(header, label);
+        write_label(footer, label);
 
         /* insert the free block into the head of the free list */
         insert_into_list(ptr, size);
@@ -640,7 +667,7 @@ void *realloc(void *old_ptr, size_t size) {
         return NULL;
     }
 
-    uint32_t required_size = ALIGN(size) + 2 * UINT32_T_SIZE;
+    uint32_t need_size = required_size(size);
 
     void *old_header = get_header_ptr(old_ptr);
     old_size = read_size(old_header);
@@ -648,13 +675,13 @@ void *realloc(void *old_ptr, size_t size) {
     /* if new size is smaller than old size, split the original and
      * free the last part,
      */
-    if (required_size <= old_size - ONE_ELEM_BLOCK_SIZE) {
+    if (need_size <= old_size - ONE_ELEM_BLOCK_SIZE) {
         /* modify the size */
-        write_header_footer(old_ptr, required_size, 1);
+        write_header_footer(old_ptr, need_size, 1);
 
         /* split and free */
-        uint32_t remain_size = old_size - required_size;
-        void *splitted_ptr = increment_pointer(old_ptr, required_size);
+        uint32_t remain_size = old_size - need_size;
+        void *splitted_ptr = increment_pointer(old_ptr, need_size);
         write_header_footer(splitted_ptr, remain_size, 0);
 
         /* insert into free list */
@@ -664,10 +691,13 @@ void *realloc(void *old_ptr, size_t size) {
         void *next_ptr = get_next_block(old_ptr, old_size);
         swap_prev_free(next_ptr);
 
+        checkheap(1);
         return old_ptr;
     }
     /* not big enough to split */
-    else if (required_size <= old_size) {
+    else if (need_size <= old_size) {
+
+        checkheap(1);
         return old_ptr;
     }
     else {
@@ -679,16 +709,16 @@ void *realloc(void *old_ptr, size_t size) {
          */
         if (in_heap(next_ptr) &&
             !read_alloc(next_header = get_header_ptr(next_ptr)) &&
-            ((next_size = read_size(next_header)) + old_size > required_size)) {
+            ((next_size = read_size(next_header)) + old_size > need_size)) {
             /* split the remaining block */
-            if (required_size <= next_size + old_size - ONE_ELEM_BLOCK_SIZE) {
+            if (need_size <= next_size + old_size - ONE_ELEM_BLOCK_SIZE) {
                 /* disconnect the free block from the list first */
                 disconnect_from_list(next_ptr, next_size);
 
                 /* write size header & footer */
-                write_header_footer(old_ptr, required_size, 1);
-                void *splitted_ptr = increment_pointer(old_ptr, required_size);
-                uint32_t remain_size = next_size + old_size - required_size;
+                write_header_footer(old_ptr, need_size, 1);
+                void *splitted_ptr = increment_pointer(old_ptr, need_size);
+                uint32_t remain_size = next_size + old_size - need_size;
                 write_header_footer(splitted_ptr, remain_size, 0);
 
                 /* insert the remaining block into the list */
@@ -704,6 +734,7 @@ void *realloc(void *old_ptr, size_t size) {
                 void *next_next_ptr = get_next_block(next_ptr, next_size);
                 swap_prev_free(next_next_ptr);
 
+                checkheap(1);
                 return old_ptr;
             }
         }
@@ -715,6 +746,7 @@ void *realloc(void *old_ptr, size_t size) {
 
             /* Free the old block. */
             free(old_ptr);
+            checkheap(1);
             return new_ptr;
         }
     }
@@ -735,8 +767,6 @@ void *calloc (size_t nmemb, size_t size) {
 // Returns 0 if no errors were found, otherwise returns the error
 int mm_checkheap(int verbose) {
     if (verbose) {
-        print_heap();
-        print_free_list();
         void *heap_lo = mem_heap_lo();
         void *heap_hi = decrement_pointer(mem_heap_hi(), TAIL_LEAP);
         if (heap_hi < heap_lo) return 0;
@@ -775,10 +805,17 @@ int mm_checkheap(int verbose) {
                 }
                 prev_free_flag = 0;
             }
-            /* if the current block is free, its prev block cannot be free */
+            /* if the current block is free */
             else {
+                /* its prev block cannot be free */
                 if (prev_free_flag == 1) {
                     dbg_printf("error: there are two consecutive free blocks\n");
+                    return -1;
+                }
+                /* its header and footer should be the same */
+                if (read_label(header) != read_label(footer)) {
+                    dbg_printf("error: header and footer are not the same in a freed block\n");
+                    print_heap();
                     return -1;
                 }
                 prev_free_flag = 1;
@@ -838,6 +875,9 @@ int mm_checkheap(int verbose) {
                 p = prev_free_block(p);
             }
         }
+
+        print_heap();
+        print_free_list();
     }
     
     return 0;
